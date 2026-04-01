@@ -19,6 +19,7 @@
 static volatile uint8_t  g_temperature  = 0U;
 static volatile uint8_t  g_humidity     = 0U;
 static volatile uint8_t  g_mq2_percent  = 0U;
+static volatile uint16_t g_mq2_adc      = 0U;
 
 /* Task function prototype */
 void vTaskMQ2( void * pvParameters );
@@ -27,46 +28,78 @@ void vTaskKEY( void * pvParameters );
 void vTaskUartCmd( void * pvParameters );
 void vTaskDHT11( void * pvParameters );
 void vTaskOLED( void * pvParameters );
+void vTaskWDG( void * pvParameters );
+
+static void prvHardwareInit(void);
+static BaseType_t prvCreateAppTasks(void);
+static void prvFatalError(void);
 
 int main(void)
 {
-    /* 1. System Init is called from startup file */
-    /* Ensure NVIC priority group is set appropriately for FreeRTOS */
-    /* FreeRTOS typically requires Priority Group 4 (4 bits for preemption priority) 
-       on STM32/GD32 if not managed by the port. 
-       However, the port usually handles it or assumes it. 
-       Let's set it explicitly to be safe. */
-    nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0);
+    prvHardwareInit();
 
-    /* Initialize UART */
-    uart_init(115200);
-    /* Initialize LED */
-    LED_Init();
-    /* Initialize MQ2 (ADC) */
-    MQ2_Init();
-    /* Initialize KEY */
-    KEY_Init();
-    /* Initialize DHT11 */
-    DHT11_Init();
-    /* Initialize OLED */
-    OLED_Init();
-
-    /* 2. Create Task */
-    xTaskCreate( vTaskMQ2,   "TaskMQ2",   configMINIMAL_STACK_SIZE + 128, NULL, 2, NULL );
-    xTaskCreate( vTaskLED,   "TaskLED",   configMINIMAL_STACK_SIZE,       NULL, 2, NULL );
-    xTaskCreate( vTaskKEY,   "TaskKEY",   configMINIMAL_STACK_SIZE,       NULL, 2, NULL );
-    xTaskCreate( vTaskDHT11,  "TaskDHT11",  configMINIMAL_STACK_SIZE + 128, NULL, 2, NULL );
-    xTaskCreate( vTaskOLED,   "TaskOLED",   configMINIMAL_STACK_SIZE * 4,   NULL, 2, NULL );
-    if (uart_rx_queue != NULL) {
-        xTaskCreate( vTaskUartCmd, "TaskUart", configMINIMAL_STACK_SIZE + 128, NULL, 3, NULL );
+    if (prvCreateAppTasks() != pdPASS)
+    {
+        prvFatalError();
     }
 
-    /* 3. Start Scheduler */
     vTaskStartScheduler();
 
-    while(1)
+    /* Scheduler should never return. If it does, heap/port configuration is wrong. */
+    prvFatalError();
+}
+
+static void prvHardwareInit(void)
+{
+    /* FreeRTOS on Cortex-M expects all implemented priority bits to be preemption bits. */
+    nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0);
+
+    uart_init(115200);
+    LED_Init();
+    MQ2_Init();
+    KEY_Init();
+    DHT11_Init();
+    OLED_Init();
+
+    /* FWDGT: IRC40K ~40kHz, DIV64 -> 625Hz, reload 1250 -> timeout ~2s */
+    rcu_osci_on(RCU_IRC40K);
+    rcu_osci_stab_wait(RCU_IRC40K);
+    fwdgt_config(1250U, FWDGT_PSC_DIV64);
+    fwdgt_enable();
+}
+
+static BaseType_t prvCreateAppTasks(void)
+{
+    BaseType_t status = pdPASS;
+
+    status &= xTaskCreate(vTaskWDG,    "TaskWDG",  configMINIMAL_STACK_SIZE,        NULL, 4, NULL);
+    status &= xTaskCreate(vTaskMQ2,    "TaskMQ2",  configMINIMAL_STACK_SIZE + 128U, NULL, 2, NULL);
+    status &= xTaskCreate(vTaskLED,    "TaskLED",  configMINIMAL_STACK_SIZE,        NULL, 2, NULL);
+    status &= xTaskCreate(vTaskKEY,    "TaskKEY",  configMINIMAL_STACK_SIZE,        NULL, 2, NULL);
+    status &= xTaskCreate(vTaskDHT11,  "TaskDHT11",configMINIMAL_STACK_SIZE + 128U, NULL, 2, NULL);
+    status &= xTaskCreate(vTaskOLED,   "TaskOLED", configMINIMAL_STACK_SIZE * 4U,   NULL, 2, NULL);
+
+    if (uart_rx_queue != NULL)
     {
-        /* Should not reach here */
+        status &= xTaskCreate(vTaskUartCmd, "TaskUart", configMINIMAL_STACK_SIZE + 128U, NULL, 3, NULL);
+    }
+
+    return status;
+}
+
+static void prvFatalError(void)
+{
+    volatile uint32_t delay = 0U;
+
+    taskDISABLE_INTERRUPTS();
+
+    while (1)
+    {
+        LED1_Toggle();
+        for (delay = 0U; delay < 200000U; ++delay)
+        {
+            __NOP();
+        }
     }
 }
 
@@ -74,7 +107,8 @@ void vTaskMQ2( void * pvParameters )
 {
     uint16_t adc_value;
     uint8_t gas_percent;
-    char buffer[32];
+    uint32_t voltage_mv;
+    char buffer[48];
     
     for( ;; )
     {
@@ -84,10 +118,15 @@ void vTaskMQ2( void * pvParameters )
            Percentage = (adc_value / 4095) * 100 
         */
         gas_percent = (uint8_t)((adc_value * 100U) / 4095U);
+        voltage_mv = ((uint32_t)adc_value * 3300U) / 4095U;
+        g_mq2_adc = adc_value;
 
         g_mq2_percent = gas_percent;  // 共享给 OLED 显示
         
-        snprintf(buffer, sizeof(buffer), "MQ2: %d%%\r\n", gas_percent);
+        snprintf(buffer, sizeof(buffer), "MQ2: %d%%, %lu.%03luV\r\n",
+                 gas_percent,
+                 voltage_mv / 1000U,
+                 voltage_mv % 1000U);
         usart_send_string(USART0, buffer);
         
         vTaskDelay(1000);
@@ -170,9 +209,7 @@ void vTaskDHT11( void * pvParameters )
     {
         uint8_t result;
 
-        taskENTER_CRITICAL();
         result = DHT11_ReadData(&humidity, &temperature);
-        taskEXIT_CRITICAL();
 
         if(result == 1U)
         {
@@ -192,34 +229,41 @@ void vTaskDHT11( void * pvParameters )
 
 void vTaskOLED( void * pvParameters )
 {
-    char    buf[17];
-    uint8_t last_temp = 0xFFU;
-    uint8_t last_humi = 0xFFU;
-    uint8_t last_mq2  = 0xFFU;
+    char     buf[17];
+    uint8_t  last_temp = 0U;
+    uint8_t  last_humi = 0U;
+    uint8_t  last_mq2  = 0xFFU;
+    uint16_t last_adc  = 0xFFFFU;
 
     /* Initial placeholders for all 4 lines (8x16, Y=0/16/32/48) */
-    OLED_ShowString(0,  0, "DHT11 Sensor", OLED_8X16);
-    OLED_ShowString(0, 16, "Temp:  -- C ", OLED_8X16);
-    OLED_ShowString(0, 32, "Humi:  -- % ", OLED_8X16);
-    OLED_ShowString(0, 48, "MQ2:   -- %", OLED_8X16);
+    OLED_ShowString(0,  0, "Temp:  -- C ", OLED_8X16);
+    OLED_ShowString(0, 16, "Humi:  -- % ", OLED_8X16);
+    OLED_ShowString(0, 32, "MQ2:   -- % ", OLED_8X16);
+    OLED_ShowString(0, 48, "ADC: -.---V", OLED_8X16);
     taskENTER_CRITICAL();
     OLED_Update();
     taskEXIT_CRITICAL();
 
     for( ;; )
     {
-        uint8_t temp  = g_temperature;
-        uint8_t humi  = g_humidity;
-        uint8_t mq2   = g_mq2_percent;
-        uint8_t dirty = 0U;
+        uint8_t  temp  = g_temperature;
+        uint8_t  humi  = g_humidity;
+        uint8_t  mq2   = g_mq2_percent;
+        uint16_t adc   = g_mq2_adc;
+        uint8_t  dirty = 0U;
 
-        if (temp != last_temp || humi != last_humi)
+        if (temp != last_temp)
         {
             snprintf(buf, sizeof(buf), "Temp: %3d C ", temp);
-            OLED_ShowString(0, 16, buf, OLED_8X16);
-            snprintf(buf, sizeof(buf), "Humi: %3d %% ", humi);
-            OLED_ShowString(0, 32, buf, OLED_8X16);
+            OLED_ShowString(0, 0, buf, OLED_8X16);
             last_temp = temp;
+            dirty = 1U;
+        }
+
+        if (humi != last_humi)
+        {
+            snprintf(buf, sizeof(buf), "Humi: %3d %% ", humi);
+            OLED_ShowString(0, 16, buf, OLED_8X16);
             last_humi = humi;
             dirty = 1U;
         }
@@ -227,8 +271,19 @@ void vTaskOLED( void * pvParameters )
         if (mq2 != last_mq2)
         {
             snprintf(buf, sizeof(buf), "MQ2:  %3d %%", mq2);
-            OLED_ShowString(0, 48, buf, OLED_8X16);
+            OLED_ShowString(0, 32, buf, OLED_8X16);
             last_mq2 = mq2;
+            dirty = 1U;
+        }
+
+        if (adc != last_adc)
+        {
+            uint32_t voltage_mv = ((uint32_t)adc * 3300U) / 4095U;
+            snprintf(buf, sizeof(buf), "ADC: %1lu.%03luV ",
+                     voltage_mv / 1000U,
+                     voltage_mv % 1000U);
+            OLED_ShowString(0, 48, buf, OLED_8X16);
+            last_adc = adc;
             dirty = 1U;
         }
 
@@ -242,6 +297,3 @@ void vTaskOLED( void * pvParameters )
         vTaskDelay(500);
     }
 }
-
-
-

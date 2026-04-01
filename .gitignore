@@ -1,0 +1,14 @@
+# 编译输出目录
+build/
+dist/
+out/
+output/
+bin/
+obj/
+target/
+USER/Objects
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+*.log
