@@ -30,9 +30,30 @@ void vTaskDHT11( void * pvParameters );
 void vTaskOLED( void * pvParameters );
 void vTaskWDG( void * pvParameters );
 
+typedef enum
+{
+    WDG_TASK_MQ2 = 0,
+    WDG_TASK_LED,
+    WDG_TASK_KEY,
+    WDG_TASK_DHT11,
+    WDG_TASK_OLED,
+    WDG_TASK_COUNT
+} wdg_task_id_t;
+
 static void prvHardwareInit(void);
 static BaseType_t prvCreateAppTasks(void);
 static void prvFatalError(void);
+static void prvWatchdogBeat(wdg_task_id_t task_id);
+static BaseType_t prvWatchdogAllHealthy(void);
+
+static volatile TickType_t g_wdg_heartbeat[WDG_TASK_COUNT] = { 0 };
+
+#define WDG_TIMEOUT_MQ2_TICKS     pdMS_TO_TICKS(3000U)
+#define WDG_TIMEOUT_LED_TICKS     pdMS_TO_TICKS(4500U)
+#define WDG_TIMEOUT_KEY_TICKS     pdMS_TO_TICKS(500U)
+#define WDG_TIMEOUT_DHT11_TICKS   pdMS_TO_TICKS(4500U)
+#define WDG_TIMEOUT_OLED_TICKS    pdMS_TO_TICKS(2000U)
+#define WDG_SUPERVISOR_PERIOD     pdMS_TO_TICKS(500U)
 
 int main(void)
 {
@@ -61,10 +82,10 @@ static void prvHardwareInit(void)
     DHT11_Init();
     OLED_Init();
 
-    /* FWDGT: IRC40K ~40kHz, DIV64 -> 625Hz, reload 1250 -> timeout ~2s */
+    /* FWDGT: IRC40K ~40kHz, DIV256 -> 156.25Hz, reload 1250 -> timeout ~8s */
     rcu_osci_on(RCU_IRC40K);
     rcu_osci_stab_wait(RCU_IRC40K);
-    fwdgt_config(1250U, FWDGT_PSC_DIV64);
+    fwdgt_config(1250U, FWDGT_PSC_DIV256);
     fwdgt_enable();
 }
 
@@ -103,6 +124,37 @@ static void prvFatalError(void)
     }
 }
 
+static void prvWatchdogBeat(wdg_task_id_t task_id)
+{
+    g_wdg_heartbeat[task_id] = xTaskGetTickCount();
+}
+
+static BaseType_t prvWatchdogAllHealthy(void)
+{
+    static const TickType_t timeout_ticks[WDG_TASK_COUNT] =
+    {
+        WDG_TIMEOUT_MQ2_TICKS,
+        WDG_TIMEOUT_LED_TICKS,
+        WDG_TIMEOUT_KEY_TICKS,
+        WDG_TIMEOUT_DHT11_TICKS,
+        WDG_TIMEOUT_OLED_TICKS
+    };
+    TickType_t now = xTaskGetTickCount();
+    UBaseType_t i;
+
+    for (i = 0; i < (UBaseType_t)WDG_TASK_COUNT; ++i)
+    {
+        TickType_t last = g_wdg_heartbeat[i];
+
+        if ((last == 0U) || ((now - last) > timeout_ticks[i]))
+        {
+            return pdFALSE;
+        }
+    }
+
+    return pdTRUE;
+}
+
 void vTaskMQ2( void * pvParameters )
 {
     uint16_t adc_value;
@@ -128,7 +180,8 @@ void vTaskMQ2( void * pvParameters )
                  voltage_mv / 1000U,
                  voltage_mv % 1000U);
         usart_send_string(USART0, buffer);
-        
+        prvWatchdogBeat(WDG_TASK_MQ2);
+
         vTaskDelay(1000);
     }
 }
@@ -138,6 +191,7 @@ void vTaskLED( void * pvParameters)
     for( ;; )
     {
 			LED1_Toggle();
+			prvWatchdogBeat(WDG_TASK_LED);
 			vTaskDelay(2000);
     }
 }
@@ -154,7 +208,8 @@ void vTaskKEY( void * pvParameters )
         {
             LED1_Toggle();
         }
-        
+
+        prvWatchdogBeat(WDG_TASK_KEY);
         vTaskDelay(20); // 20ms polling interval
     }
 }
@@ -222,6 +277,7 @@ void vTaskDHT11( void * pvParameters )
             snprintf(buffer, sizeof(buffer), "DHT11: Read failed\r\n");
         }
         usart_send_string(USART0, buffer);
+        prvWatchdogBeat(WDG_TASK_DHT11);
 
         vTaskDelay(2000); /* DHT11 minimum sampling interval: 1s, use 2s */
     }
@@ -294,6 +350,20 @@ void vTaskOLED( void * pvParameters )
             taskEXIT_CRITICAL();
         }
 
+        prvWatchdogBeat(WDG_TASK_OLED);
         vTaskDelay(500);
+    }
+}
+
+void vTaskWDG( void * pvParameters )
+{
+    for( ;; )
+    {
+        if (prvWatchdogAllHealthy() == pdTRUE)
+        {
+            fwdgt_counter_reload();
+        }
+
+        vTaskDelay(WDG_SUPERVISOR_PERIOD);
     }
 }
