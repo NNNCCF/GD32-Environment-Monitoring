@@ -20,8 +20,34 @@ static volatile uint8_t  g_temperature  = 0U;
 static volatile uint8_t  g_humidity     = 0U;
 static volatile uint8_t  g_mq2_percent  = 0U;
 static volatile uint16_t g_mq2_adc      = 0U;
+static volatile uint16_t g_mq2_adc_raw  = 0U;
+static volatile uint8_t  g_ui_page      = 0U;
+static volatile uint8_t  g_alarm_temp   = 0U;
+static volatile uint8_t  g_alarm_humi   = 0U;
+static volatile uint8_t  g_alarm_active = 0U;
 
 #define SENSOR_AVG_WINDOW 8U
+#define UI_PAGE_COUNT     3U
+
+#define TEMP_ALARM_LOW_C    10U
+#define TEMP_ALARM_HIGH_C   35U
+#define HUMI_ALARM_LOW_PCT  30U
+#define HUMI_ALARM_HIGH_PCT 80U
+
+#define ZH_WENSHI_SHUJU   "\xCE\xC2\xCA\xAA\xCA\xFD\xBE\xDD"
+#define ZH_WENDU          "\xCE\xC2\xB6\xC8"
+#define ZH_SHIDU          "\xCA\xAA\xB6\xC8"
+#define ZH_QITI_SHUJU     "\xC6\xF8\xCC\xE5\xCA\xFD\xBE\xDD"
+#define ZH_NONGDU_BAIFENBI "\xC5\xA8\xB6\xC8\xB0\xD9\xB7\xD6\xB1\xC8"
+#define ZH_YUANSHIZHI     "\xD4\xAD\xCA\xBC\xD6\xB5"
+#define ZH_BAOJING_XINXI  "\xB1\xA8\xBE\xAF\xD0\xC5\xCF\xA2"
+#define ZH_WENDU_BAOJING  "\xCE\xC2\xB6\xC8\xB1\xA8\xBE\xAF"
+#define ZH_WENDU_ZHENGCHANG "\xCE\xC2\xB6\xC8\xD5\xFD\xB3\xA3"
+#define ZH_SHIDU_BAOJING  "\xCA\xAA\xB6\xC8\xB1\xA8\xBE\xAF"
+#define ZH_SHIDU_ZHENGCHANG "\xCA\xAA\xB6\xC8\xD5\xFD\xB3\xA3"
+#define ZH_ZHISHIDENG     "\xD6\xB8\xCA\xBE\xB5\xC6"
+#define ZH_KAI            "\xBF\xAA"
+#define ZH_GUAN           "\xB9\xD8"
 
 typedef struct
 {
@@ -219,6 +245,7 @@ void vTaskMQ2( void * pvParameters )
         gas_percent = (uint8_t)((adc_value * 100U) / 4095U);
         voltage_mv = ((uint32_t)adc_value * 3300U) / 4095U;
         g_mq2_adc = adc_value;
+        g_mq2_adc_raw = adc_raw;
 
         g_mq2_percent = gas_percent;  // 共享给 OLED 显示
         
@@ -237,9 +264,17 @@ void vTaskLED( void * pvParameters)
 {
     for( ;; )
     {
-			LED1_Toggle();
-			prvWatchdogBeat(WDG_TASK_LED);
-			vTaskDelay(2000);
+        if (g_alarm_active != 0U)
+        {
+            LED1_On();
+        }
+        else
+        {
+            LED1_Off();
+        }
+
+        prvWatchdogBeat(WDG_TASK_LED);
+        vTaskDelay(100);
     }
 }
 
@@ -253,7 +288,7 @@ void vTaskKEY( void * pvParameters )
         
         if (key_val == 1) // KEY1 Pressed
         {
-            LED1_Toggle();
+            g_ui_page = (uint8_t)((g_ui_page + 1U) % UI_PAGE_COUNT);
         }
 
         prvWatchdogBeat(WDG_TASK_KEY);
@@ -322,9 +357,14 @@ void vTaskDHT11( void * pvParameters )
         {
             uint16_t avg_temp = sensor_avg_queue_push_and_get_avg(&temp_avg_queue, temperature);
             uint16_t avg_humi = sensor_avg_queue_push_and_get_avg(&humi_avg_queue, humidity);
+            uint8_t temp_alarm = ((avg_temp < TEMP_ALARM_LOW_C) || (avg_temp > TEMP_ALARM_HIGH_C)) ? 1U : 0U;
+            uint8_t humi_alarm = ((avg_humi < HUMI_ALARM_LOW_PCT) || (avg_humi > HUMI_ALARM_HIGH_PCT)) ? 1U : 0U;
 
             g_temperature = (uint8_t)avg_temp;
             g_humidity    = (uint8_t)avg_humi;
+            g_alarm_temp  = temp_alarm;
+            g_alarm_humi  = humi_alarm;
+            g_alarm_active = (uint8_t)((temp_alarm != 0U) || (humi_alarm != 0U));
             snprintf(buffer, sizeof(buffer), "DHT11: Temp=%d C, Humi=%d%%\r\n", g_temperature, g_humidity);
         }
         else
@@ -345,15 +385,11 @@ void vTaskOLED( void * pvParameters )
     uint8_t  last_humi = 0U;
     uint8_t  last_mq2  = 0xFFU;
     uint16_t last_adc  = 0xFFFFU;
-
-    /* Initial placeholders for all 4 lines (8x16, Y=0/16/32/48) */
-    OLED_ShowString(0,  0, "Temp:  -- C ", OLED_8X16);
-    OLED_ShowString(0, 16, "Humi:  -- % ", OLED_8X16);
-    OLED_ShowString(0, 32, "MQ2:   -- % ", OLED_8X16);
-    OLED_ShowString(0, 48, "ADC: -.---V", OLED_8X16);
-    taskENTER_CRITICAL();
-    OLED_Update();
-    taskEXIT_CRITICAL();
+    uint16_t last_adc_raw = 0xFFFFU;
+    uint8_t  last_page = 0xFFU;
+    uint8_t  last_alarm = 0xFFU;
+    uint8_t  last_alarm_temp = 0xFFU;
+    uint8_t  last_alarm_humi = 0xFFU;
 
     for( ;; )
     {
@@ -361,42 +397,99 @@ void vTaskOLED( void * pvParameters )
         uint8_t  humi  = g_humidity;
         uint8_t  mq2   = g_mq2_percent;
         uint16_t adc   = g_mq2_adc;
+        uint16_t adc_raw = g_mq2_adc_raw;
+        uint16_t mv_avg = (uint16_t)(((uint32_t)adc * 3300U) / 4095U);
+        uint16_t mv_raw = (uint16_t)(((uint32_t)adc_raw * 3300U) / 4095U);
+        uint8_t  page  = g_ui_page;
+        uint8_t  alarm = g_alarm_active;
+        uint8_t  alarm_temp = g_alarm_temp;
+        uint8_t  alarm_humi = g_alarm_humi;
         uint8_t  dirty = 0U;
 
-        if (temp != last_temp)
+        if ((page != last_page) ||
+            (temp != last_temp) ||
+            (humi != last_humi) ||
+            (mq2 != last_mq2) ||
+            (adc != last_adc) ||
+            (adc_raw != last_adc_raw) ||
+            (alarm != last_alarm) ||
+            (alarm_temp != last_alarm_temp) ||
+            (alarm_humi != last_alarm_humi))
         {
-            snprintf(buf, sizeof(buf), "Temp: %3d C ", temp);
-            OLED_ShowString(0, 0, buf, OLED_8X16);
+            OLED_Clear();
+
+            if (page == 0U)
+            {
+                OLED_ShowChinese(32, 0, (char *)ZH_WENSHI_SHUJU);
+                OLED_ReverseArea(0, 0, 128, 16);
+
+                OLED_ShowChinese(0, 16, (char *)ZH_WENDU);
+                snprintf(buf, sizeof(buf), ":%3d C", temp);
+                OLED_ShowString(32, 16, buf, OLED_8X16);
+
+                OLED_ShowChinese(0, 32, (char *)ZH_SHIDU);
+                snprintf(buf, sizeof(buf), ":%3d %%", humi);
+                OLED_ShowString(32, 32, buf, OLED_8X16);
+            }
+            else if (page == 1U)
+            {
+                OLED_ShowChinese(32, 0, (char *)ZH_QITI_SHUJU);
+                OLED_ReverseArea(0, 0, 128, 16);
+
+                OLED_ShowChinese(0, 16, (char *)ZH_NONGDU_BAIFENBI);
+                snprintf(buf, sizeof(buf), ":%3d %%", mq2);
+                OLED_ShowString(80, 16, buf, OLED_8X16);
+
+                OLED_ShowChinese(0, 32, (char *)ZH_YUANSHIZHI);
+                snprintf(buf, sizeof(buf), ":%4umV", mv_raw);
+                OLED_ShowString(48, 32, buf, OLED_8X16);
+
+                OLED_ShowString(0, 48, "AVG mV:", OLED_8X16);
+                snprintf(buf, sizeof(buf), "%4u", mv_avg);
+                OLED_ShowString(64, 48, buf, OLED_8X16);
+            }
+            else
+            {
+                OLED_ShowChinese(32, 0, (char *)ZH_BAOJING_XINXI);
+                OLED_ReverseArea(0, 0, 128, 16);
+
+                if (alarm_temp != 0U)
+                {
+                    OLED_ShowChinese(0, 16, (char *)ZH_WENDU_BAOJING);
+                }
+                else
+                {
+                    OLED_ShowChinese(0, 16, (char *)ZH_WENDU_ZHENGCHANG);
+                }
+                snprintf(buf, sizeof(buf), " %3dC", temp);
+                OLED_ShowString(80, 16, buf, OLED_8X16);
+
+                if (alarm_humi != 0U)
+                {
+                    OLED_ShowChinese(0, 32, (char *)ZH_SHIDU_BAOJING);
+                }
+                else
+                {
+                    OLED_ShowChinese(0, 32, (char *)ZH_SHIDU_ZHENGCHANG);
+                }
+                snprintf(buf, sizeof(buf), " %3d%%", humi);
+                OLED_ShowString(80, 32, buf, OLED_8X16);
+
+                OLED_ShowChinese(0, 48, (char *)ZH_ZHISHIDENG);
+                OLED_ShowChinese(64, 48, (char *)((alarm != 0U) ? ZH_KAI : ZH_GUAN));
+            }
+
+            last_page = page;
             last_temp = temp;
-            dirty = 1U;
-        }
-
-        if (humi != last_humi)
-        {
-            snprintf(buf, sizeof(buf), "Humi: %3d %% ", humi);
-            OLED_ShowString(0, 16, buf, OLED_8X16);
             last_humi = humi;
+            last_mq2  = mq2;
+            last_adc  = adc;
+            last_adc_raw = adc_raw;
+            last_alarm = alarm;
+            last_alarm_temp = alarm_temp;
+            last_alarm_humi = alarm_humi;
             dirty = 1U;
-        }
-
-        if (mq2 != last_mq2)
-        {
-            snprintf(buf, sizeof(buf), "MQ2:  %3d %%", mq2);
-            OLED_ShowString(0, 32, buf, OLED_8X16);
-            last_mq2 = mq2;
-            dirty = 1U;
-        }
-
-        if (adc != last_adc)
-        {
-            uint32_t voltage_mv = ((uint32_t)adc * 3300U) / 4095U;
-            snprintf(buf, sizeof(buf), "ADC: %1lu.%03luV ",
-                     voltage_mv / 1000U,
-                     voltage_mv % 1000U);
-            OLED_ShowString(0, 48, buf, OLED_8X16);
-            last_adc = adc;
-            dirty = 1U;
-        }
+        }        
 
         if (dirty)
         {

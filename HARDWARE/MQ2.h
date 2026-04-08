@@ -7,7 +7,7 @@
  * 硬件连接说明:
  * MQ2 VCC -> 5V (必须接5V以保证加热正常)
  * MQ2 GND -> GND
- * MQ2 AO  -> PA0 (ADC0_IN0, 模拟输出)
+ * MQ2 AO  -> PA0 (模拟输出，接 ADC)
  * MQ2 DO  -> 悬空 (本程序使用ADC采集，无需连接DO)
  */
 
