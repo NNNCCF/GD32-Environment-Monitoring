@@ -21,6 +21,19 @@ static volatile uint8_t  g_humidity     = 0U;
 static volatile uint8_t  g_mq2_percent  = 0U;
 static volatile uint16_t g_mq2_adc      = 0U;
 
+#define SENSOR_AVG_WINDOW 8U
+
+typedef struct
+{
+    uint16_t samples[SENSOR_AVG_WINDOW];
+    uint32_t sum;
+    uint8_t  index;
+    uint8_t  count;
+} sensor_avg_queue_t;
+
+static void sensor_avg_queue_init(sensor_avg_queue_t *queue);
+static uint16_t sensor_avg_queue_push_and_get_avg(sensor_avg_queue_t *queue, uint16_t sample);
+
 /* Task function prototype */
 void vTaskMQ2( void * pvParameters );
 void vTaskLED( void * pvParameters );
@@ -54,6 +67,35 @@ static volatile TickType_t g_wdg_heartbeat[WDG_TASK_COUNT] = { 0 };
 #define WDG_TIMEOUT_DHT11_TICKS   pdMS_TO_TICKS(4500U)
 #define WDG_TIMEOUT_OLED_TICKS    pdMS_TO_TICKS(2000U)
 #define WDG_SUPERVISOR_PERIOD     pdMS_TO_TICKS(500U)
+
+static void sensor_avg_queue_init(sensor_avg_queue_t *queue)
+{
+    (void)memset(queue, 0, sizeof(*queue));
+}
+
+static uint16_t sensor_avg_queue_push_and_get_avg(sensor_avg_queue_t *queue, uint16_t sample)
+{
+    if (queue->count < SENSOR_AVG_WINDOW)
+    {
+        queue->samples[queue->index] = sample;
+        queue->sum += sample;
+        queue->count++;
+    }
+    else
+    {
+        queue->sum -= queue->samples[queue->index];
+        queue->samples[queue->index] = sample;
+        queue->sum += sample;
+    }
+
+    queue->index++;
+    if (queue->index >= SENSOR_AVG_WINDOW)
+    {
+        queue->index = 0U;
+    }
+
+    return (uint16_t)(queue->sum / queue->count);
+}
 
 int main(void)
 {
@@ -158,13 +200,18 @@ static BaseType_t prvWatchdogAllHealthy(void)
 void vTaskMQ2( void * pvParameters )
 {
     uint16_t adc_value;
+    uint16_t adc_raw;
     uint8_t gas_percent;
     uint32_t voltage_mv;
     char buffer[48];
+    sensor_avg_queue_t mq2_avg_queue;
+
+    sensor_avg_queue_init(&mq2_avg_queue);
     
     for( ;; )
     {
-        adc_value = MQ2_GetData();
+        adc_raw = MQ2_GetData();
+        adc_value = sensor_avg_queue_push_and_get_avg(&mq2_avg_queue, adc_raw);
         /* 
            ADC is 12-bit (0-4095). 
            Percentage = (adc_value / 4095) * 100 
@@ -259,6 +306,11 @@ void vTaskDHT11( void * pvParameters )
     uint8_t humidity;
     uint8_t temperature;
     char buffer[40];
+    sensor_avg_queue_t humi_avg_queue;
+    sensor_avg_queue_t temp_avg_queue;
+
+    sensor_avg_queue_init(&humi_avg_queue);
+    sensor_avg_queue_init(&temp_avg_queue);
 
     for( ;; )
     {
@@ -268,9 +320,12 @@ void vTaskDHT11( void * pvParameters )
 
         if(result == 1U)
         {
-            g_temperature = temperature;
-            g_humidity    = humidity;
-            snprintf(buffer, sizeof(buffer), "DHT11: Temp=%d C, Humi=%d%%\r\n", temperature, humidity);
+            uint16_t avg_temp = sensor_avg_queue_push_and_get_avg(&temp_avg_queue, temperature);
+            uint16_t avg_humi = sensor_avg_queue_push_and_get_avg(&humi_avg_queue, humidity);
+
+            g_temperature = (uint8_t)avg_temp;
+            g_humidity    = (uint8_t)avg_humi;
+            snprintf(buffer, sizeof(buffer), "DHT11: Temp=%d C, Humi=%d%%\r\n", g_temperature, g_humidity);
         }
         else
         {

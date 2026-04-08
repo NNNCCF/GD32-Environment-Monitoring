@@ -535,10 +535,10 @@ ARM Macro Assembler    Page 9
               00000000 
 Command Line: --debug --xref --diag_suppress=9931 --cpu=Cortex-M3 --apcs=interw
 ork --depend=.\objects\startup_gd32f10x_md.d -o.\objects\startup_gd32f10x_md.o 
--ID:\Arm\Packs\GigaDevice\GD32F10x_DFP\2.0.1\Device\Include --predefine="__EVAL
- SETA 1" --predefine="__UVISION_VERSION SETA 543" --predefine="GD32F10X_HD SETA
- 1" --predefine="USE_STDPERIPH_DRIVER SETA 1" --list=.\listings\startup_gd32f10
-x_md.lst ..\CORE\startup_gd32f10x_md.s
+-ID:\Arm\Packs\GigaDevice\GD32F10x_DFP\2.0.1\Device\Include --predefine="__UVIS
+ION_VERSION SETA 543" --predefine="GD32F10X_HD SETA 1" --predefine="USE_STDPERI
+PH_DRIVER SETA 1" --list=.\listings\startup_gd32f10x_md.lst ..\CORE\startup_gd3
+2f10x_md.s
 
 
 
@@ -1273,4 +1273,4 @@ Symbol: __use_two_region_memory
       None
 Comment: __use_two_region_memory unused
 3 symbols
-411 symbols in table
+410 symbols in table
