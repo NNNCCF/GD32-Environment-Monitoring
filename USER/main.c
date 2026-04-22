@@ -28,7 +28,8 @@ static volatile uint8_t  g_alarm_gas    = 0U;
 static volatile uint8_t  g_alarm_active = 0U;
 
 #define SENSOR_AVG_WINDOW 12U
-#define UI_PAGE_COUNT     3U
+#define UI_PAGE_COUNT           3U
+#define UI_AUTO_SWITCH_TICKS    150U  /* 150 * 20ms = 3000ms */
 
 #define TEMP_ALARM_LOW_C    10U
 #define TEMP_ALARM_HIGH_C   30U
@@ -286,19 +287,30 @@ void vTaskLED( void * pvParameters)
 
 void vTaskKEY( void * pvParameters )
 {
-    uint8_t key_val;
-    
+    uint8_t  key_val;
+    uint16_t auto_cnt = 0U;
+
     for( ;; )
     {
         key_val = KEY_Scan(0);
-        
-        if (key_val == 1) // KEY1 Pressed
+
+        if (key_val == 1U)
         {
             g_ui_page = (uint8_t)((g_ui_page + 1U) % UI_PAGE_COUNT);
+            auto_cnt  = 0U;
+        }
+        else
+        {
+            auto_cnt++;
+            if (auto_cnt >= UI_AUTO_SWITCH_TICKS)
+            {
+                auto_cnt  = 0U;
+                g_ui_page = (uint8_t)((g_ui_page + 1U) % UI_PAGE_COUNT);
+            }
         }
 
         prvWatchdogBeat(WDG_TASK_KEY);
-        vTaskDelay(20); // 20ms polling interval
+        vTaskDelay(20);
     }
 }
 
